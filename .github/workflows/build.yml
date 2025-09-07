@@ -18,5 +18,10 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
-          UNIT_TEST_COMMAND: pytest -q --maxfail=1 --disable-warnings --cov=app --cov-report=term-missing
+          UNIT_TEST_COMMAND: >
+            pytest -q --maxfail=1 --disable-warnings
+            --junitxml=junit.xml
+            --cov=app
+            --cov-report=term-missing
+            --cov-report=xml:coverage.xml
           API_NAME: customer-api

@@ -6,3 +6,5 @@ pydantic
 pydantic[email]
 aio-pika
 httpx
+pytest-cov
+pytest
