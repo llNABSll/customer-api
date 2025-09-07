@@ -17,13 +17,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: customer-rabbitmq
     ports:
-      - "5672:5672"    
-      - "15672:15672" 
+      - "5672:5672"
+      - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: app
       RABBITMQ_DEFAULT_PASS: app
@@ -54,6 +54,24 @@ services:
       POSTGRES_SERVER: ${POSTGRES_SERVER}
       POSTGRES_PORT: ${POSTGRES_PORT}
       RABBITMQ_URL: ${RABBITMQ_URL}
+
+  tests:
+    build: .
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    command: >
+      bash -lc "
+        pip install -U pip &&
+        pip install -r requirements.txt &&
+        pip install pytest &&
+        pytest -q
+      "
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - rabbitmq
 
 volumes:
   postgres_data:

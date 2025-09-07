@@ -9,7 +9,7 @@ from app.core.logger import logger
 
 def create_client(db: Session, client_data: ClientCreate) -> Client:
     try:
-        new_client = Client(**client_data.dict())
+        new_client = Client(**client_data.model_dump())
         db.add(new_client)
         db.commit()
         db.refresh(new_client)
@@ -40,7 +40,7 @@ def update_client(db: Session, client_id: int, updates: ClientUpdate) -> Client:
     if not client:
         logger.warning(f"Client non trouvé pour mise à jour (id={client_id})")
         return None
-    for key, value in updates.dict(exclude_unset=True).items():
+    for key, value in updates.model_dump(exclude_unset=True).items():
         setattr(client, key, value)
     db.commit()
     db.refresh(client)
