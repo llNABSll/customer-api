@@ -1,92 +1,115 @@
 # app/core/rabbitmq.py
-import os
+from __future__ import annotations
+
 import json
 import logging
-import asyncio
+import os
+from typing import Iterable, Awaitable, Callable
+
 import aio_pika
 
-logger = logging.getLogger("RABBITMQ")
-logging.basicConfig(level=logging.INFO)
+from app.core.config import settings
 
-RABBITMQ_URL = os.getenv("RABBITMQ_URL")
+logger = logging.getLogger(__name__)
+
+_EXCHANGE_TYPE_MAP = {
+    "topic": aio_pika.ExchangeType.TOPIC,
+    "fanout": aio_pika.ExchangeType.FANOUT,
+    "direct": aio_pika.ExchangeType.DIRECT,
+    "headers": aio_pika.ExchangeType.HEADERS,
+}
+
 
 class RabbitMQ:
     def __init__(self):
+        self.url = settings.RABBITMQ_URL or "amqp://app:app@rabbitmq:5672/%2F"
+        self.exchange_name = settings.RABBITMQ_EXCHANGE or "events"
+        self.exchange_type = _EXCHANGE_TYPE_MAP.get(
+            (settings.RABBITMQ_EXCHANGE_TYPE or "topic").lower(),
+            aio_pika.ExchangeType.TOPIC,
+        )
         self.connection: aio_pika.RobustConnection | None = None
-        self.channel: aio_pika.abc.AbstractChannel | None = None
+        self.channel: aio_pika.Channel | None = None
+        self.exchange: aio_pika.Exchange | None = None
 
     async def connect(self):
-        if not RABBITMQ_URL:
-            logger.warning("RABBITMQ_URL non défini, RabbitMQ désactivé.")
-            return
-        try:
-            self.connection = await aio_pika.connect_robust(RABBITMQ_URL)
-            self.channel = await self.connection.channel(publisher_confirms=True)
-            logger.info("Connecté à RabbitMQ")
-        except Exception as e:
-            logger.error(f"Échec connexion RabbitMQ: {e}")
+        self.connection = await aio_pika.connect_robust(self.url)
+        self.channel = await self.connection.channel()
+        self.exchange = await self.channel.declare_exchange(
+            self.exchange_name, self.exchange_type, durable=True
+        )
+        logger.info(
+            "RabbitMQ connected. Exchange '%s' (%s) declared.",
+            self.exchange_name,
+            self.exchange_type.name.lower(),
+        )
 
     async def disconnect(self):
         try:
             if self.channel and not self.channel.is_closed:
                 await self.channel.close()
+                logger.info("RabbitMQ channel closed.")
+        except Exception:
+            logger.exception("Failed to close RabbitMQ channel.")
+        try:
             if self.connection and not self.connection.is_closed:
                 await self.connection.close()
-            logger.info("Déconnecté de RabbitMQ")
-        except Exception as e:
-            logger.error(f"Erreur fermeture RabbitMQ: {e}")
+                logger.info("RabbitMQ connection closed.")
+        except Exception:
+            logger.exception("Failed to close RabbitMQ connection.")
 
-    async def send(self, queue_name: str, message: dict | str):
-        """Envoi direct dans une file (point-to-point)."""
-        if not self.channel:
-            logger.error("Canal RabbitMQ indisponible")
+    async def publish_message(self, routing_key: str, message: dict):
+        if not self.exchange:
+            logger.error("Cannot publish: exchange is not available (connect() not called).")
             return
-        payload = message if isinstance(message, str) else json.dumps(message)
-        queue = await self.channel.declare_queue(queue_name, durable=True)
-        await self.channel.default_exchange.publish(
-            aio_pika.Message(body=payload.encode("utf-8")),
-            routing_key=queue.name,
-        )
-        logger.info(f"[send] -> queue={queue_name} payload={payload}")
-
-    async def publish(self, exchange_name: str, message: dict | str):
-        """Publication en fanout (broadcast)."""
-        if not self.channel:
-            logger.error("Canal RabbitMQ indisponible")
-            return
-        payload = message if isinstance(message, str) else json.dumps(message)
-        exchange = await self.channel.declare_exchange(
-            exchange_name, aio_pika.ExchangeType.FANOUT, durable=True
-        )
-
-        msg = aio_pika.Message(
-            body=payload.encode("utf-8"),
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            content_type="application/json",
-        )
-        
-        await exchange.publish(aio_pika.Message(body=payload.encode("utf-8")), routing_key="")
-        logger.info(f"[publish] -> exchange={exchange_name} payload={payload}")
-
-    async def subscribe(self, exchange_name: str, callback):
-        """Souscription fanout (optionnel)."""
-        if not self.channel:
-            logger.error("Canal RabbitMQ indisponible")
-            return
-        exchange = await self.channel.declare_exchange(
-            exchange_name, aio_pika.ExchangeType.FANOUT, durable=True
-        )
-        queue = await self.channel.declare_queue(exclusive=True)
-        await queue.bind(exchange)
-        await queue.consume(callback)
-
-    # Petit helper utilisable depuis des endpoints sync
-    def publish_async(self, exchange_name: str, message: dict | str):
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.publish(exchange_name, message))
-        except RuntimeError:
-            # pas de loop (ex: contexte sync pur), on en crée une
-            asyncio.run(self.publish(exchange_name, message))
+            rk = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
+            await self.exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps(message).encode("utf-8"),
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=rk,
+            )
+            logger.info("Published rk='%s' payload=%s", routing_key, message)
+        except Exception:
+            logger.exception("Failed to publish rk=%s", routing_key)
+
 
 rabbitmq = RabbitMQ()
+
+
+async def start_consumer(
+    connection: aio_pika.RobustConnection,
+    exchange: aio_pika.Exchange,
+    exchange_type: aio_pika.ExchangeType,
+    queue_name: str,
+    patterns: Iterable[str],
+    handler: Callable[[dict, str], Awaitable[None]],
+):
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=16)
+
+    queue = await channel.declare_queue(queue_name, durable=True, auto_delete=False)
+
+    if exchange_type == aio_pika.ExchangeType.FANOUT:
+        await queue.bind(exchange, routing_key="")
+        logger.info("Queue %s bound (fanout)", queue_name)
+    else:
+        for p in patterns:
+            await queue.bind(exchange, routing_key=p)
+            logger.info("Queue %s bound to pattern %s", queue_name, p)
+
+    async with queue.iterator() as it:
+        async for message in it:
+            async with message.process():
+                rk = message.routing_key
+                try:
+                    payload = json.loads(message.body.decode("utf-8"))
+                except Exception:
+                    payload = {"raw": message.body}
+                try:
+                    await handler(payload, rk)
+                except Exception:
+                    logger.exception("Handler error rk=%s", rk)
