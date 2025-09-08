@@ -1,4 +1,3 @@
-# app/core/rabbitmq.py
 from __future__ import annotations
 
 import json
@@ -22,17 +21,22 @@ _EXCHANGE_TYPE_MAP = {
 
 class RabbitMQ:
     def __init__(self):
+        # URL commune (fallback par défaut)
         self.url = settings.RABBITMQ_URL or "amqp://app:app@rabbitmq:5672/%2F"
+
+        # Exchange + type (pilotés par l'env)
         self.exchange_name = settings.RABBITMQ_EXCHANGE or "events"
         self.exchange_type = _EXCHANGE_TYPE_MAP.get(
             (settings.RABBITMQ_EXCHANGE_TYPE or "topic").lower(),
             aio_pika.ExchangeType.TOPIC,
         )
+
         self.connection: aio_pika.RobustConnection | None = None
         self.channel: aio_pika.Channel | None = None
         self.exchange: aio_pika.Exchange | None = None
 
     async def connect(self):
+        """Connexion robuste + déclaration de l'exchange."""
         self.connection = await aio_pika.connect_robust(self.url)
         self.channel = await self.connection.channel()
         self.exchange = await self.channel.declare_exchange(
@@ -51,6 +55,7 @@ class RabbitMQ:
                 logger.info("RabbitMQ channel closed.")
         except Exception:
             logger.exception("Failed to close RabbitMQ channel.")
+
         try:
             if self.connection and not self.connection.is_closed:
                 await self.connection.close()
@@ -59,9 +64,11 @@ class RabbitMQ:
             logger.exception("Failed to close RabbitMQ connection.")
 
     async def publish_message(self, routing_key: str, message: dict):
+        """Publie un message. (routing_key ignorée si fanout)"""
         if not self.exchange:
             logger.error("Cannot publish: exchange is not available (connect() not called).")
             return
+
         try:
             rk = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
             await self.exchange.publish(
@@ -72,7 +79,7 @@ class RabbitMQ:
                 ),
                 routing_key=rk,
             )
-            logger.info("Published rk='%s' payload=%s", routing_key, message)
+            logger.info("Published rk=%s, payload=%s", routing_key, message)
         except Exception:
             logger.exception("Failed to publish rk=%s", routing_key)
 
@@ -80,6 +87,7 @@ class RabbitMQ:
 rabbitmq = RabbitMQ()
 
 
+# ---------- Consommation (topic ou fanout) ----------
 async def start_consumer(
     connection: aio_pika.RobustConnection,
     exchange: aio_pika.Exchange,
@@ -88,6 +96,10 @@ async def start_consumer(
     patterns: Iterable[str],
     handler: Callable[[dict, str], Awaitable[None]],
 ):
+    """
+    - topic: bind sur chaque pattern fourni (ex: 'order.#', 'customer.#')
+    - fanout: ignore les patterns et bind sans routing_key
+    """
     channel = await connection.channel()
     await channel.set_qos(prefetch_count=16)
 

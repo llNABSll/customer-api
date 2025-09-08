@@ -1,4 +1,3 @@
-# app/main.py
 from __future__ import annotations
 
 import asyncio
@@ -14,15 +13,15 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import engine, init_db
-from app.core.rabbitmq import rabbitmq, start_consumer
+from app.infra.events.rabbitmq import rabbitmq, start_consumer 
 
 # Logging
 try:
-    from app.core.logging import setup_logging, access_log_middleware  # type: ignore
+    from app.core.logging import setup_logging, access_log_middleware 
     setup_logging()
 except Exception:
     logging.basicConfig(level=logging.INFO)
-    def access_log_middleware(request, call_next):  # type: ignore
+    def access_log_middleware(request, call_next):
         return call_next(request)
 
 logger = logging.getLogger("customer-api")
@@ -60,7 +59,7 @@ async def lifespan(app: FastAPI):
                 rabbitmq.exchange,
                 rabbitmq.exchange_type,
                 queue_name="q-customer",
-                patterns=["product.#", "order.#"],  # en topic; ignoré si fanout
+                patterns=["product.#", "order.#"],  # écoute product + order
                 handler=on_event,
             )
         )
@@ -87,7 +86,7 @@ app = FastAPI(
 )
 
 # Access log
-app.middleware("http")(access_log_middleware)  # type: ignore
+app.middleware("http")(access_log_middleware)
 
 
 # Metrics middleware
@@ -134,7 +133,7 @@ def health():
 
 
 # Router métier
-from app.api.routes import router as customer_router  # noqa
+from app.api.routes import router as customer_router  
 app.include_router(customer_router)
 
 
