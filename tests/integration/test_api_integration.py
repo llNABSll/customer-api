@@ -19,7 +19,8 @@ def client_auth(client, patch_rabbitmq):
 
     yield client
 
-    app.dependency_overrides.clear()
+    del app.dependency_overrides[require_read]
+    del app.dependency_overrides[require_write]
 
 
 def test_create_and_get_customer(client_auth):

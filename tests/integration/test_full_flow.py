@@ -17,7 +17,8 @@ def client_auth(client, patch_rabbitmq):
 
     yield client
 
-    app.dependency_overrides.clear()
+    del app.dependency_overrides[require_read]
+    del app.dependency_overrides[require_write]
 
 def test_full_customer_lifecycle(client_auth):
     # 1. Création

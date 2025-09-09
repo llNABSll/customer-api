@@ -31,8 +31,8 @@ def session():
     try:
         yield db
     finally:
-        db.close()
         transaction.rollback()
+        db.close()
         connection.close()
 
 
@@ -40,10 +40,7 @@ def session():
 def client(session):
     """Provide a TestClient that uses the test database session."""
     def override_get_db():
-        try:
-            yield session
-        finally:
-            session.close()
+        yield session
 
     app.dependency_overrides[get_db] = override_get_db
     yield TestClient(app)

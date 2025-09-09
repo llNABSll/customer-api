@@ -137,25 +137,4 @@ from app.api.routes import router as customer_router
 app.include_router(customer_router)
 
 
-# Filet de sécurité si lifespan ne tourne pas
-@app.on_event("startup")
-async def _mq_startup_fallback():
-    if not getattr(rabbitmq, "connection", None):
-        try:
-            await rabbitmq.connect()
 
-            async def on_event(payload: dict, rk: str):
-                logger.info("[customer-api] received %s: %s", rk, payload)
-
-            asyncio.create_task(
-                start_consumer(
-                    rabbitmq.connection,
-                    rabbitmq.exchange,
-                    rabbitmq.exchange_type,
-                    queue_name="q-customer",
-                    patterns=["product.#", "order.#"],
-                    handler=on_event,
-                )
-            )
-        except Exception:
-            logger.exception("RabbitMQ startup failed (fallback)")
