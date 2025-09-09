@@ -1,0 +1,85 @@
+# tests/unit/test_api.py
+import pytest
+from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
+from datetime import datetime, timezone
+
+from app.main import app
+from app.services import client_service
+from app.security import security
+import app.api.routes as customer_routes
+from app.schemas.client import ClientResponse
+
+@pytest.fixture
+def client(patch_rabbitmq):
+    mock_svc = AsyncMock(spec=client_service.CustomerService)
+    
+    fake_client = ClientResponse(
+        id=1, name="Client", email="client@test.com",
+        created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc)
+    )
+
+    mock_svc.get.return_value = fake_client
+    mock_svc.list.return_value = [fake_client]
+    mock_svc.get_by_email.return_value = fake_client
+    mock_svc.create.return_value = fake_client
+    mock_svc.update.return_value = fake_client
+    mock_svc.delete.return_value = fake_client
+
+    fake_user_context = security.AuthContext(
+        user="tester",
+        email="tester@example.com",
+        roles=["customer:read", "customer:write"],
+    )
+
+    app.dependency_overrides = {
+        customer_routes.get_customer_service: lambda: mock_svc,
+        security.require_user: lambda: fake_user_context,
+        security.require_read: lambda: fake_user_context,
+        security.require_write: lambda: fake_user_context,
+    }
+
+    yield TestClient(app)
+    app.dependency_overrides = {}
+
+
+def test_create_customer(client):
+    r = client.post("/customers/", json={"name": "New", "email": "new@test.com"})
+    assert r.status_code == 201
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.create.assert_awaited()
+
+def test_list_customers(client):
+    r = client.get("/customers/")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+def test_read_customer(client):
+    r = client.get("/customers/1")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get.assert_called_with(1)
+
+def test_read_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get.side_effect = client_service.NotFoundError()
+    r = client.get("/customers/99")
+    assert r.status_code == 404
+
+def test_update_customer(client):
+    r = client.put("/customers/1", json={"name": "Updated"})
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.assert_awaited()
+
+def test_delete_customer(client):
+    r = client.delete("/customers/1")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.delete.assert_awaited()
+
+def test_read_by_email(client):
+    r = client.get("/customers/email/client@test.com")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get_by_email.assert_called_with("client@test.com")
