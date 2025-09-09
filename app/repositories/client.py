@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 def create_client(db: Session, client_data: ClientCreate) -> Client:
     """Créer un client en base."""
     try:
-        new_client = Client(**client_data.dict())
+        # Utilise model_dump() au lieu de dict()
+        new_client = Client(**client_data.model_dump())
         db.add(new_client)
         db.commit()
         db.refresh(new_client)
@@ -49,11 +50,11 @@ def update_client(db: Session, client_id: int, updates: ClientUpdate) -> Client 
         logger.debug("client not found for update", extra={"id": client_id})
         return None
 
-    for key, value in updates.dict(exclude_unset=True).items():
+    # Utilise model_dump() au lieu de dict()
+    for key, value in updates.model_dump(exclude_unset=True).items():
         setattr(client, key, value)
 
-    # incrément de version pour optimistic locking
-    client.version += 1
+    # La version est maintenant incrémentée automatiquement par SQLAlchemy
 
     db.commit()
     db.refresh(client)

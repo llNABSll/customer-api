@@ -7,56 +7,38 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.core.database import Base, get_db
 
+# This import is crucial to register the models with SQLAlchemy's Base
+from app.models import client as client_model
 
-# --------------------------------------------------------------------
-# DB SQLite en mémoire pour les tests
-# --------------------------------------------------------------------
-# connect_args est nécessaire pour SQLite en mode multi-thread (utilisé par FastAPI)
-engine = create_engine("sqlite:///:memory:", future=True, connect_args={"check_same_thread": False})
-TestingSessionLocal = sessionmaker(
-    bind=engine, autoflush=False, autocommit=False, future=True
+# --- Test Database Setup ---
+SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Create tables once for the entire test session
+Base.metadata.create_all(bind=engine)
 
-@pytest.fixture(scope="session", autouse=True)
-def setup_database():
-    """Créer et détruire les tables pour toute la session de tests"""
-    Base.metadata.create_all(bind=engine)
-    yield
-    Base.metadata.drop_all(bind=engine)
-
-
-@pytest.fixture
+@pytest.fixture()
 def session():
-    """Fournit une session DB propre pour chaque test."""
-    db = TestingSessionLocal()
+    """Create a new database session for a test, within a transaction."""
+    connection = engine.connect()
+    transaction = connection.begin()
+    db = TestingSessionLocal(bind=connection)
+
     try:
         yield db
     finally:
         db.close()
+        transaction.rollback()
+        connection.close()
 
 
-# --------------------------------------------------------------------
-# Patcher RabbitMQ pour ne rien envoyer pendant les tests
-# --------------------------------------------------------------------
-@pytest.fixture
-def patch_rabbitmq(monkeypatch):
-    """Mock pour publish_message de RabbitMQ."""
-    async def fake_publish_message(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(
-        "app.infra.events.rabbitmq.RabbitMQ.publish_message", fake_publish_message
-    )
-
-
-# --------------------------------------------------------------------
-# Fournir un client FastAPI avec la DB de test
-# --------------------------------------------------------------------
-@pytest.fixture
+@pytest.fixture()
 def client(session):
-    """Client API pour les tests d'intégration."""
-    # Override get_db pour injecter notre session SQLite in-memory
+    """Provide a TestClient that uses the test database session."""
     def override_get_db():
         try:
             yield session
@@ -65,4 +47,15 @@ def client(session):
 
     app.dependency_overrides[get_db] = override_get_db
     yield TestClient(app)
-    app.dependency_overrides.clear()
+    del app.dependency_overrides[get_db]
+
+
+@pytest.fixture
+def patch_rabbitmq(monkeypatch):
+    """Mock for publish_message of RabbitMQ."""
+    async def fake_publish_message(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.infra.events.rabbitmq.RabbitMQ.publish_message", fake_publish_message
+    )

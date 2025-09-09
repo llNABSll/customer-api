@@ -40,8 +40,9 @@ class ClientResponse(ClientBase):
     Inclut les métadonnées techniques.
     """
     id: int
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    version: int
+    created_at: datetime
+    updated_at: datetime
 
     # Pydantic v2 : active la conversion depuis un ORM (SQLAlchemy)
     model_config = ConfigDict(from_attributes=True)

@@ -16,6 +16,7 @@ def client(patch_rabbitmq):
     
     fake_client = ClientResponse(
         id=1, name="Client", email="client@test.com",
+        version=1,
         created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc)
     )
 
