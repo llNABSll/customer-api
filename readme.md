@@ -16,14 +16,14 @@ Il persiste les données dans **PostgreSQL** et publie des **événements** dans
 
 ## Démarrage rapide
 
-### 1) Cloner le dépôt
+### 1 Cloner le dépôt
 
 ```bash
 git clone https://github.com/votre-nom/customer-api.git
 cd customer-api
 ```
 
-### 2) Créer le `.env`
+### 2 Créer le `.env`
 
 > Valeurs par défaut pour un lancement **100% Docker** (API + DB + RabbitMQ) :
 
@@ -42,7 +42,7 @@ RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/%2F
 # EVENT_PUBLISH_TIMEOUT_SECONDS=2
 ```
 
-### 3) Lancer les conteneurs
+### 3 Lancer les conteneurs
 
 ```bash
 docker compose up --build
