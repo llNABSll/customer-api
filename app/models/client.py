@@ -15,6 +15,9 @@ class Client(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    orders_count: Mapped[int] = mapped_column(Integer, server_default=text("0"), nullable=False)
+    last_order_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     __mapper_args__ = {

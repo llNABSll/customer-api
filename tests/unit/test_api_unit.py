@@ -84,3 +84,31 @@ def test_read_by_email(client):
     assert r.status_code == 200
     mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
     mock_service.get_by_email.assert_called_with("client@test.com")
+
+def test_create_conflict(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.create.side_effect = client_service.EmailAlreadyExistsError()
+    r = client.post("/customers/", json={"name": "Dup", "email": "dup@test.com"})
+    assert r.status_code == 409
+
+def test_update_invalid_if_match(client):
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "abc"})
+    assert r.status_code == 400
+
+def test_update_conflict(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.side_effect = client_service.ConcurrencyConflictError()
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
+    assert r.status_code == 409
+
+def test_delete_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.delete.side_effect = client_service.NotFoundError()
+    r = client.delete("/customers/123")
+    assert r.status_code == 404
+
+def test_read_by_email_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get_by_email.return_value = None
+    r = client.get("/customers/email/missing@test.com")
+    assert r.status_code == 404

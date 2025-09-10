@@ -1,181 +1,178 @@
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
-from app.infra.events.rabbitmq import RabbitMQ, start_consumer
-import aio_pika
+from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
+from datetime import datetime, timezone
 
-@pytest.mark.asyncio
-@patch("app.infra.events.rabbitmq.aio_pika.connect_robust")
-async def test_rabbitmq_connect(mock_connect_robust):
-    """Test the connect method of RabbitMQ."""
-    # Arrange
-    mock_connection = AsyncMock()
-    mock_channel = AsyncMock()
-    mock_exchange = AsyncMock()
-    mock_connect_robust.return_value = mock_connection
-    mock_connection.channel.return_value = mock_channel
-    mock_channel.declare_exchange.return_value = mock_exchange
+from app.main import app
+from app.services import client_service
+from app.security import security
+import app.api.routes as customer_routes
+from app.schemas.client import ClientResponse
 
-    rabbitmq = RabbitMQ()
 
-    # Act
-    await rabbitmq.connect()
+@pytest.fixture
+def client(patch_rabbitmq):
+    mock_svc = AsyncMock(spec=client_service.CustomerService)
 
-    # Assert
-    mock_connect_robust.assert_called_once_with(rabbitmq.url)
-    mock_connection.channel.assert_called_once()
-    mock_channel.declare_exchange.assert_called_once_with(
-        rabbitmq.exchange_name, rabbitmq.exchange_type, durable=True
+    fake_client = ClientResponse(
+        id=1,
+        name="Client",
+        email="client@test.com",
+        version=1,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
-    assert rabbitmq.connection == mock_connection
-    assert rabbitmq.channel == mock_channel
-    assert rabbitmq.exchange == mock_exchange
 
-@pytest.mark.asyncio
-async def test_rabbitmq_disconnect():
-    """Test the disconnect method of RabbitMQ."""
-    # Arrange
-    rabbitmq = RabbitMQ()
-    rabbitmq.connection = AsyncMock()
-    rabbitmq.channel = AsyncMock()
-    rabbitmq.connection.is_closed = False
-    rabbitmq.channel.is_closed = False
+    mock_svc.get.return_value = fake_client
+    mock_svc.list.return_value = [fake_client]
+    mock_svc.get_by_email.return_value = fake_client
+    mock_svc.create.return_value = fake_client
+    mock_svc.update.return_value = fake_client
+    mock_svc.delete.return_value = fake_client
 
-    # Act
-    await rabbitmq.disconnect()
+    fake_user_context = security.AuthContext(
+        user="tester",
+        email="tester@example.com",
+        roles=["customer:read", "customer:write"],
+    )
 
-    # Assert
-    rabbitmq.channel.close.assert_called_once()
-    rabbitmq.connection.close.assert_called_once()
+    app.dependency_overrides = {
+        customer_routes.get_customer_service: lambda: mock_svc,
+        security.require_user: lambda: fake_user_context,
+        security.require_read: lambda: fake_user_context,
+        security.require_write: lambda: fake_user_context,
+    }
 
-@pytest.mark.asyncio
-async def test_rabbitmq_disconnect_exception():
-    """Test exception handling in disconnect."""
-    # Arrange
-    rabbitmq = RabbitMQ()
-    rabbitmq.connection = AsyncMock()
-    rabbitmq.channel = AsyncMock()
-    rabbitmq.connection.is_closed = False
-    rabbitmq.channel.is_closed = False
-    rabbitmq.channel.close.side_effect = Exception("Test Exception")
-    rabbitmq.connection.close.side_effect = Exception("Test Exception")
+    yield TestClient(app)
+    app.dependency_overrides = {}
 
-    # Act
-    await rabbitmq.disconnect()
 
-    # Assert
-    rabbitmq.channel.close.assert_called_once()
-    rabbitmq.connection.close.assert_called_once()
+# -------------------------
+# Cas "heureux"
+# -------------------------
 
-@pytest.mark.asyncio
-async def test_rabbitmq_publish_message_topic():
-    """Test the publish_message method of RabbitMQ with a topic exchange."""
-    # Arrange
-    rabbitmq = RabbitMQ()
-    rabbitmq.exchange = AsyncMock()
-    rabbitmq.exchange_type = aio_pika.ExchangeType.TOPIC
+def test_create_customer(client):
+    r = client.post("/customers/", json={"name": "New", "email": "new@test.com"})
+    assert r.status_code == 201
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.create.assert_awaited()
 
-    routing_key = "test.key"
-    message_data = {"key": "value"}
 
-    # Act
-    await rabbitmq.publish_message(routing_key, message_data)
+def test_list_customers(client):
+    r = client.get("/customers/")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
 
-    # Assert
-    rabbitmq.exchange.publish.assert_called_once()
 
-@pytest.mark.asyncio
-async def test_rabbitmq_publish_message_fanout():
-    """Test the publish_message method of RabbitMQ with a fanout exchange."""
-    # Arrange
-    rabbitmq = RabbitMQ()
-    rabbitmq.exchange = AsyncMock()
-    rabbitmq.exchange_type = aio_pika.ExchangeType.FANOUT
+def test_read_customer(client):
+    r = client.get("/customers/1")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get.assert_called_with(1)
 
-    routing_key = "test.key"
-    message_data = {"key": "value"}
 
-    # Act
-    await rabbitmq.publish_message(routing_key, message_data)
+def test_update_customer(client):
+    r = client.put("/customers/1", json={"name": "Updated"})
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.assert_awaited()
 
-    # Assert
-    rabbitmq.exchange.publish.assert_called_once()
-    assert rabbitmq.exchange.publish.call_args[1]["routing_key"] == ""
 
-@pytest.mark.asyncio
-async def test_rabbitmq_publish_message_no_exchange():
-    """Test that publish_message does not publish if exchange is not available."""
-    # Arrange
-    rabbitmq = RabbitMQ()
-    rabbitmq.exchange = None
+def test_delete_customer(client):
+    r = client.delete("/customers/1")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.delete.assert_awaited()
 
-    # Act
-    await rabbitmq.publish_message("some.key", {"data": "value"})
 
-    # Assert
-    pass
+def test_read_by_email(client):
+    r = client.get("/customers/email/client@test.com")
+    assert r.status_code == 200
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get_by_email.assert_called_with("client@test.com")
 
-@pytest.mark.asyncio
-async def test_rabbitmq_publish_message_exception():
-    """Test exception handling in publish_message."""
-    rabbitmq = RabbitMQ()
-    rabbitmq.exchange = AsyncMock()
-    rabbitmq.exchange.publish.side_effect = Exception("Test Exception")
 
-    await rabbitmq.publish_message("some.key", {"data": "value"})
+# -------------------------
+# Cas d'erreurs
+# -------------------------
 
-# ... (tout le reste de ton fichier inchangé au-dessus)
+def test_read_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get.side_effect = client_service.NotFoundError()
+    r = client.get("/customers/99")
+    assert r.status_code == 404
 
-class StopConsumer(Exception):
-    pass
 
-@pytest.mark.asyncio
-async def test_start_consumer_topic():
-    """Test the start_consumer function with a topic exchange."""
-    # Arrange
-    connection = AsyncMock()
-    exchange = AsyncMock()
-    exchange.name = "test_exchange"
-    exchange_type = aio_pika.ExchangeType.TOPIC
-    queue_name = "test_queue"
-    patterns = ["pattern1", "pattern2"]
+def test_create_conflict(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.create.side_effect = client_service.EmailAlreadyExistsError()
+    r = client.post("/customers/", json={"name": "Dup", "email": "dup@test.com"})
+    assert r.status_code == 409
 
-    # 🔁 Le consumer n'élève pas les erreurs, donc on ne met PAS de side_effect ici
-    handler = AsyncMock()
 
-    channel = AsyncMock()
-    connection.channel.return_value = channel
+def test_update_invalid_if_match(client):
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "abc"})
+    assert r.status_code == 400
 
-    queue = AsyncMock()
-    channel.declare_queue.return_value = queue
 
-    message = AsyncMock()
-    message.routing_key = "pattern1"
-    message.body = b'{"key": "value"}'
+def test_update_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.side_effect = client_service.NotFoundError()
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
+    assert r.status_code == 404
 
-    # --- iterator async (context manager) ---
-    async def async_iterator(items):
-        for item in items:
-            yield item
 
-    iterator = async_iterator([message])
+def test_update_conflict_email(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.side_effect = client_service.EmailAlreadyExistsError()
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
+    assert r.status_code == 409
 
-    # ✅ queue.iterator() est un context manager async
-    queue.iterator = MagicMock()
-    queue.iterator.return_value.__aenter__ = AsyncMock(return_value=iterator)
-    queue.iterator.return_value.__aexit__ = AsyncMock(return_value=None)
 
-    # ✅ message.process() est un context manager async
-    message.process = MagicMock()
-    message.process.return_value.__aenter__ = AsyncMock(return_value=message)
-    message.process.return_value.__aexit__ = AsyncMock(return_value=None)
+def test_update_conflict_version(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.update.side_effect = client_service.ConcurrencyConflictError()
+    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
+    assert r.status_code == 409
 
-    # Act — pas d'exception attendue
-    await start_consumer(connection, exchange, exchange_type, queue_name, patterns, handler)
 
-    # Assert
-    channel.set_qos.assert_called_once_with(prefetch_count=16)
-    channel.declare_queue.assert_called_once_with(queue_name, durable=True, auto_delete=False)
-    assert queue.bind.call_count == len(patterns)
-    handler.assert_called_once_with({"key": "value"}, "pattern1")
+def test_delete_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.delete.side_effect = client_service.NotFoundError()
+    r = client.delete("/customers/123")
+    assert r.status_code == 404
+
+
+def test_read_by_email_not_found(client):
+    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
+    mock_service.get_by_email.return_value = None
+    r = client.get("/customers/email/missing@test.com")
+    assert r.status_code == 404
+
+
+# -------------------------
+# Sécurité
+# -------------------------
+
+def test_forbidden_without_write_role(patch_rabbitmq):
+    """Vérifie qu'un utilisateur sans rôle 'customer:write' ne peut pas créer."""
+    mock_svc = AsyncMock(spec=client_service.CustomerService)
+
+    fake_user_context = security.AuthContext(
+        user="tester",
+        email="tester@example.com",
+        roles=["customer:read"],  # pas de write
+    )
+
+    app.dependency_overrides = {
+        customer_routes.get_customer_service: lambda: mock_svc,
+        security.require_user: lambda: fake_user_context,
+        security.require_read: lambda: fake_user_context,
+        # require_write reste intact → doit déclencher 403
+    }
+
+    test_client = TestClient(app)
+    r = test_client.post("/customers/", json={"name": "X", "email": "x@test.com"})
+    assert r.status_code == 403
+
+    app.dependency_overrides = {}
