@@ -1,5 +1,3 @@
-# app/services/client_service.py
-
 from __future__ import annotations
 
 import logging
@@ -25,6 +23,7 @@ class EmailAlreadyExistsError(Exception):
 class ConcurrencyConflictError(Exception):
     """Optimistic locking : entité modifiée ailleurs."""
     pass
+
 
 # ---------- Service ----------
 class CustomerService:
@@ -56,7 +55,7 @@ class CustomerService:
         self,
         q: Optional[str] = None,
         company: Optional[str] = None,
-        sort_by: Literal["id", "name", "email", "company", "created_at"] = "id",
+        sort_by: Literal["id", "first_name", "last_name", "email", "company", "created_at", "updated_at"] = "id",
         sort_dir: Literal["asc", "desc"] = "asc",
         skip: int = 0,
         limit: int = 10,
@@ -64,7 +63,13 @@ class CustomerService:
         query = self.db.query(Client)
 
         if q:
-            query = query.filter(Client.name.ilike(f"%{q}%") | Client.email.ilike(f"%{q}%"))
+            like = f"%{q}%"
+            query = query.filter(
+                (Client.first_name.ilike(like)) |
+                (Client.last_name.ilike(like))  |
+                (Client.email.ilike(like))
+            )
+
         if company:
             query = query.filter(Client.company == company)
 
@@ -84,9 +89,15 @@ class CustomerService:
             logger.debug("create conflict: email already exists", extra={"email": data.email})
             raise EmailAlreadyExistsError("Email already exists")
 
+        # Publication event sans 'name'
         await self.mq.publish_message(
             "customer.created",
-            {"id": customer.id, "name": customer.name, "email": customer.email},
+            {
+                "id": customer.id,
+                "email": customer.email,
+                "first_name": customer.first_name,
+                "last_name": customer.last_name,
+            },
         )
         logger.info("customer created", extra={"id": customer.id})
         return customer
@@ -120,11 +131,17 @@ class CustomerService:
             logger.debug("update conflict: stale data", extra={"id": customer_id})
             raise ConcurrencyConflictError("Customer has been modified elsewhere")
 
+        # Publication event sans 'name'
         await self.mq.publish_message(
             "customer.updated",
-            {"id": customer.id, "name": customer.name, "email": customer.email},
+            {
+                "id": customer.id,
+                "email": customer.email,
+                "first_name": customer.first_name,
+                "last_name": customer.last_name,
+            },
         )
-        logger.info("customer updated", extra={"id": customer.id})
+        logger.info("customer updated", extra={"id": customer_id})
         return customer
 
     # ----- DELETE -----

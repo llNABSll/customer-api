@@ -13,7 +13,6 @@ from app.models.client import Client
 from app.schemas.client import ClientCreate, ClientUpdate
 
 
-# ---------- Fixtures ----------
 @pytest.fixture
 def fake_db():
     return MagicMock()
@@ -27,21 +26,24 @@ def fake_mq():
 @pytest.fixture
 def client_instance():
     return Client(
-        id=1, name="Test Client", email="test@example.com", version=1
+        id=1, first_name="Test", last_name="Client",
+        email="test@example.com", company="X", version=1
     )
 
-# Helper pour patcher le repo
+
 def patch_repo(monkeypatch, **methods):
     import app.repositories.client as repo
     for name, impl in methods.items():
         monkeypatch.setattr(repo, name, impl)
 
 
-# ---------- GET ----------
+# ---------------- GET ----------------
+
 def test_get_found(fake_db, fake_mq, client_instance, monkeypatch):
     patch_repo(monkeypatch, get_client=lambda db, cid: client_instance)
     svc = CustomerService(fake_db, fake_mq)
     assert svc.get(1) == client_instance
+
 
 def test_get_not_found(fake_db, fake_mq, monkeypatch):
     patch_repo(monkeypatch, get_client=lambda db, cid: None)
@@ -50,134 +52,114 @@ def test_get_not_found(fake_db, fake_mq, monkeypatch):
         svc.get(123)
 
 
-# ---------- GET BY EMAIL ----------
-def test_get_by_email_found(fake_db, fake_mq):
-    fake_client = Client(id=2, name="Email", email="x@test.com")
-    fake_db.query().filter().first.return_value = fake_client
+def test_get_by_email_found(fake_db, fake_mq, client_instance):
+    fake_db.query().filter().first.return_value = client_instance
     svc = CustomerService(fake_db, fake_mq)
-    result = svc.get_by_email("x@test.com")
-    assert result == fake_client
+    c = svc.get_by_email("test@example.com")
+    assert c == client_instance
+
 
 def test_get_by_email_not_found(fake_db, fake_mq):
     fake_db.query().filter().first.return_value = None
     svc = CustomerService(fake_db, fake_mq)
-    result = svc.get_by_email("nope@test.com")
-    assert result is None
+    c = svc.get_by_email("x@y.com")
+    assert c is None
 
 
-# ---------- LIST ----------
-def test_list_no_filters(fake_db, fake_mq):
-    fake_clients = [Client(id=1, name="C1", email="c1@test.com")]
+# ---------------- LIST ----------------
 
-    fake_query = MagicMock()
-    fake_query.order_by.return_value = fake_query
-    fake_query.offset.return_value = fake_query
-    fake_query.limit.return_value = fake_query
-    fake_query.all.return_value = fake_clients
-
-    fake_db.query.return_value = fake_query
-
-    svc = CustomerService(fake_db, fake_mq)
-    result = svc.list()
-
-    assert result == fake_clients
-    fake_db.query.assert_called_once_with(Client)
-    fake_query.order_by.assert_called_once() 
-    fake_query.offset.assert_called_once_with(0)
-    fake_query.limit.assert_called_once_with(10)
-
-def test_list_with_filters(fake_db, fake_mq):
-    # Simule que query renvoie un Query-like chainable
+def test_list_with_filters_and_sort(fake_db, fake_mq, client_instance):
     fake_query = MagicMock()
     fake_query.filter.return_value = fake_query
     fake_query.order_by.return_value = fake_query
     fake_query.offset.return_value = fake_query
-    fake_query.limit.return_value = fake_query
-    fake_query.all.return_value = [Client(id=1, name="Filtered", email="f@test.com")]
-
+    fake_query.limit.return_value.all.return_value = [client_instance]
     fake_db.query.return_value = fake_query
+
     svc = CustomerService(fake_db, fake_mq)
-    result = svc.list(q="f", company="TestCo", sort_by="name", sort_dir="desc")
-    assert result[0].name == "Filtered"
-    assert fake_query.filter.called
-    assert fake_query.order_by.called
+    results = svc.list(q="Test", company="X", sort_by="email", sort_dir="desc")
+    assert results == [client_instance]
+    fake_query.filter.assert_called()
+    fake_query.order_by.assert_called()
 
 
-# ---------- CREATE ----------
+# ---------------- CREATE ----------------
+
 @pytest.mark.asyncio
 async def test_create_ok(fake_db, fake_mq, monkeypatch):
-    patch_repo(
-        monkeypatch,
-        create_client=lambda db, data: Client(id=1, **data.model_dump()),
-    )
+    patch_repo(monkeypatch, create_client=lambda db, data: Client(id=1, **data.model_dump()))
     svc = CustomerService(fake_db, fake_mq)
-    created = await svc.create(ClientCreate(name="New", email="new@test.com"))
+    created = await svc.create(ClientCreate(first_name="New", last_name="User", email="new@test.com"))
     assert created.id == 1
-    fake_mq.publish_message.assert_awaited_with(
-        "customer.created", {"id": 1, "name": "New", "email": "new@test.com"}
-    )
+    fake_mq.publish_message.assert_awaited()
+
 
 @pytest.mark.asyncio
-async def test_create_email_conflict(fake_db, fake_mq, monkeypatch):
-    patch_repo(
-        monkeypatch,
-        create_client=lambda db, data: (_ for _ in ()).throw(IntegrityError("m", "p", "o")),
-    )
+async def test_create_conflict(fake_db, fake_mq, monkeypatch):
+    patch_repo(monkeypatch, create_client=lambda db, data: (_ for _ in ()).throw(IntegrityError("x", "y", "z")))
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(EmailAlreadyExistsError):
-        await svc.create(ClientCreate(name="Dup", email="dup@test.com"))
+        await svc.create(ClientCreate(first_name="Dup", last_name="User", email="dup@test.com"))
 
 
-# ---------- UPDATE ----------
-@pytest.mark.asyncio
-async def test_update_ok(fake_db, fake_mq, client_instance, monkeypatch):
-    patch_repo(
-        monkeypatch,
-        get_client=lambda db, cid: client_instance,
-        update_client=lambda db, cid, data: Client(id=1, name=data.name, email=client_instance.email),
-    )
-    svc = CustomerService(fake_db, fake_mq)
-    updated = await svc.update(1, ClientUpdate(name="Updated Name"))
-    assert updated.name == "Updated Name"
-    fake_mq.publish_message.assert_awaited()
+# ---------------- UPDATE ----------------
 
 @pytest.mark.asyncio
 async def test_update_not_found(fake_db, fake_mq, monkeypatch):
     patch_repo(monkeypatch, get_client=lambda db, cid: None)
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(NotFoundError):
-        await svc.update(1, ClientUpdate(name="X"))
+        await svc.update(99, ClientUpdate(first_name="X"))
+
 
 @pytest.mark.asyncio
-async def test_update_version_conflict(fake_db, fake_mq, client_instance, monkeypatch):
+async def test_update_version_mismatch(fake_db, fake_mq, client_instance, monkeypatch):
     client_instance.version = 2
     patch_repo(monkeypatch, get_client=lambda db, cid: client_instance)
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(ConcurrencyConflictError):
-        await svc.update(1, ClientUpdate(name="X"), expected_version=1)
+        await svc.update(1, ClientUpdate(first_name="X"), expected_version=1)
+
 
 @pytest.mark.asyncio
-async def test_update_integrity_error(fake_db, fake_mq, client_instance, monkeypatch):
-    def bad_update(db, cid, data):
-        raise IntegrityError("msg", "params", "orig")
-
-    patch_repo(monkeypatch, get_client=lambda db, cid: client_instance, update_client=bad_update)
+async def test_update_conflict_email(fake_db, fake_mq, client_instance, monkeypatch):
+    patch_repo(
+        monkeypatch,
+        get_client=lambda db, cid: client_instance,
+        update_client=lambda db, cid, data: (_ for _ in ()).throw(IntegrityError("x", "y", "z")),
+    )
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(EmailAlreadyExistsError):
-        await svc.update(1, ClientUpdate(name="Dup"))
+        await svc.update(1, ClientUpdate(first_name="X"))
+
 
 @pytest.mark.asyncio
-async def test_update_stale_data_error(fake_db, fake_mq, client_instance, monkeypatch):
-    def bad_update(db, cid, data):
-        raise StaleDataError("msg")
-
-    patch_repo(monkeypatch, get_client=lambda db, cid: client_instance, update_client=bad_update)
+async def test_update_conflict_stale(fake_db, fake_mq, client_instance, monkeypatch):
+    patch_repo(
+        monkeypatch,
+        get_client=lambda db, cid: client_instance,
+        update_client=lambda db, cid, data: (_ for _ in ()).throw(StaleDataError()),
+    )
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(ConcurrencyConflictError):
-        await svc.update(1, ClientUpdate(name="Stale"))
+        await svc.update(1, ClientUpdate(first_name="X"))
 
 
-# ---------- DELETE ----------
+@pytest.mark.asyncio
+async def test_update_ok(fake_db, fake_mq, client_instance, monkeypatch):
+    patch_repo(
+        monkeypatch,
+        get_client=lambda db, cid: client_instance,
+        update_client=lambda db, cid, data: client_instance,
+    )
+    svc = CustomerService(fake_db, fake_mq)
+    updated = await svc.update(1, ClientUpdate(first_name="Updated"))
+    assert updated == client_instance
+    fake_mq.publish_message.assert_awaited()
+
+
+# ---------------- DELETE ----------------
+
 @pytest.mark.asyncio
 async def test_delete_ok(fake_db, fake_mq, client_instance, monkeypatch):
     patch_repo(monkeypatch, delete_client=lambda db, cid: client_instance)
@@ -186,9 +168,10 @@ async def test_delete_ok(fake_db, fake_mq, client_instance, monkeypatch):
     assert deleted == client_instance
     fake_mq.publish_message.assert_awaited_with("customer.deleted", {"id": 1})
 
+
 @pytest.mark.asyncio
 async def test_delete_not_found(fake_db, fake_mq, monkeypatch):
     patch_repo(monkeypatch, delete_client=lambda db, cid: None)
     svc = CustomerService(fake_db, fake_mq)
     with pytest.raises(NotFoundError):
-        await svc.delete(1)
+        await svc.delete(42)

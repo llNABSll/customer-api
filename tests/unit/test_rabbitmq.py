@@ -1,178 +1,324 @@
+import asyncio
+import json
+import logging
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock
-from datetime import datetime, timezone
+import aio_pika
 
-from app.main import app
-from app.services import client_service
-from app.security import security
-import app.api.routes as customer_routes
-from app.schemas.client import ClientResponse
+from app.infra.events import contracts
+from app.infra.events.rabbitmq import RabbitMQ, start_consumer, _EXCHANGE_TYPE_MAP
 
 
-@pytest.fixture
-def client(patch_rabbitmq):
-    mock_svc = AsyncMock(spec=client_service.CustomerService)
+# ------------------------------
+# Fixtures globales
+# ------------------------------
 
-    fake_client = ClientResponse(
-        id=1,
-        name="Client",
-        email="client@test.com",
-        version=1,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+@pytest.fixture(autouse=True, scope="module")
+def configure_logging():
+    logging.basicConfig(level=logging.DEBUG)
+    yield
+
+
+# ------------------------------
+# Protocols
+# ------------------------------
+
+def test_message_publisher_protocol():
+    class DummyPublisher:
+        async def publish_message(self, routing_key: str, message: dict) -> str:
+            return f"{routing_key}:{message}"
+
+    pub: contracts.MessagePublisher = DummyPublisher()
+    result = asyncio.run(pub.publish_message("rk", {"a": 1}))
+    assert "rk" in result
+
+
+def test_message_consumer_protocol():
+    class DummyConsumer:
+        async def start_consumer(self, connection, exchange, exchange_type, *args, **kwargs):
+            await kwargs["handler"]({"msg": "ok"}, "rk")
+
+    cons: contracts.MessageConsumer = DummyConsumer()
+
+    async def handler(payload, rk):
+        assert payload == {"msg": "ok"}
+        assert rk == "rk"
+
+    asyncio.run(cons.start_consumer(None, None, None, queue_name="q", patterns=["rk"], handler=handler))
+
+
+# ------------------------------
+# RabbitMQ connect/disconnect
+# ------------------------------
+
+@pytest.mark.asyncio
+async def test_connect_and_disconnect():
+    fake_connection = AsyncMock()
+    fake_channel = AsyncMock()
+    fake_exchange = AsyncMock()
+    fake_connection.channel.return_value = fake_channel
+    fake_channel.declare_exchange.return_value = fake_exchange
+
+    with patch("aio_pika.connect_robust", return_value=fake_connection):
+        mq = RabbitMQ()
+        await mq.connect()
+        assert mq.connection is fake_connection
+        assert mq.channel is fake_channel
+        assert mq.exchange is fake_exchange
+
+        mq.channel.is_closed = False
+        mq.connection.is_closed = False
+
+        await mq.disconnect()
+        fake_channel.close.assert_awaited()
+        fake_connection.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_handles_exceptions(caplog):
+    mq = RabbitMQ()
+    mq.channel = AsyncMock()
+    mq.connection = AsyncMock()
+    mq.channel.is_closed = False
+    mq.connection.is_closed = False
+    mq.channel.close.side_effect = Exception("channel error")
+    mq.connection.close.side_effect = Exception("conn error")
+
+    caplog.set_level(logging.ERROR)
+    await mq.disconnect()
+    assert "Failed to close RabbitMQ channel" in caplog.text
+    assert "Failed to close RabbitMQ connection" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disconnect_already_closed():
+    mq = RabbitMQ()
+    mq.channel = AsyncMock()
+    mq.connection = AsyncMock()
+    mq.channel.is_closed = True
+    mq.connection.is_closed = True
+
+    # Ne doit pas planter ni appeler close()
+    await mq.disconnect()
+    mq.channel.close.assert_not_called()
+    mq.connection.close.assert_not_called()
+
+
+# ------------------------------
+# publish_message
+# ------------------------------
+
+@pytest.mark.asyncio
+async def test_publish_message_success():
+    fake_exchange = AsyncMock(publish=AsyncMock())
+    mq = RabbitMQ()
+    mq.exchange = fake_exchange
+    mq.exchange_type = aio_pika.ExchangeType.TOPIC
+
+    await mq.publish_message("rk", {"hello": "world"})
+    fake_exchange.publish.assert_awaited()
+    args, kwargs = fake_exchange.publish.call_args
+    assert isinstance(args[0], aio_pika.Message)
+    assert kwargs["routing_key"] == "rk"
+
+
+@pytest.mark.asyncio
+async def test_publish_message_no_exchange(caplog):
+    mq = RabbitMQ()
+    mq.exchange = None
+    with caplog.at_level(logging.ERROR, logger="app.infra.events.rabbitmq"):
+        await mq.publish_message("rk", {"x": 1})
+    assert "Cannot publish" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_publish_message_exception(caplog):
+    fake_exchange = AsyncMock(publish=AsyncMock(side_effect=Exception("boom")))
+    mq = RabbitMQ()
+    mq.exchange = fake_exchange
+    mq.exchange_type = aio_pika.ExchangeType.TOPIC
+    with caplog.at_level(logging.ERROR, logger="app.infra.events.rabbitmq"):
+        await mq.publish_message("rk", {"fail": True})
+    assert "Failed to publish" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_publish_message_fanout():
+    fake_exchange = AsyncMock(publish=AsyncMock())
+    mq = RabbitMQ()
+    mq.exchange = fake_exchange
+    mq.exchange_type = aio_pika.ExchangeType.FANOUT
+
+    await mq.publish_message("ignored_key", {"test": True})
+    args, kwargs = fake_exchange.publish.call_args
+    # routing_key doit être forcé à ""
+    assert kwargs["routing_key"] == ""
+
+
+# ------------------------------
+# start_consumer helpers
+# ------------------------------
+
+class FakeAsyncIterator:
+    def __init__(self, messages=None):
+        self._messages = list(messages or [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+class FakeMessage:
+    def __init__(self, body: dict | bytes, routing_key: str = "rk"):
+        self.routing_key = routing_key
+        if isinstance(body, dict):
+            self.body = json.dumps(body).encode()
+        else:
+            self.body = body
+
+    def process(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+# ------------------------------
+# start_consumer tests
+# ------------------------------
+
+@pytest.mark.asyncio
+async def test_start_consumer_topic():
+    fake_queue = AsyncMock()
+    fake_channel = AsyncMock()
+    fake_channel.declare_queue.return_value = fake_queue
+    fake_connection = AsyncMock()
+    fake_connection.channel.return_value = fake_channel
+    fake_exchange = AsyncMock()
+
+    fake_message = FakeMessage({"foo": "bar"})
+    fake_queue.iterator = lambda: FakeAsyncIterator([fake_message])
+
+    called = {}
+    done = asyncio.Event()
+
+    async def handler(payload, rk):
+        called["payload"] = payload
+        called["rk"] = rk
+        done.set()
+
+    task = asyncio.create_task(
+        start_consumer(fake_connection, fake_exchange, aio_pika.ExchangeType.TOPIC,
+                       queue_name="q", patterns=["rk"], handler=handler)
     )
 
-    mock_svc.get.return_value = fake_client
-    mock_svc.list.return_value = [fake_client]
-    mock_svc.get_by_email.return_value = fake_client
-    mock_svc.create.return_value = fake_client
-    mock_svc.update.return_value = fake_client
-    mock_svc.delete.return_value = fake_client
+    await asyncio.wait_for(done.wait(), timeout=1)
+    task.cancel()
 
-    fake_user_context = security.AuthContext(
-        user="tester",
-        email="tester@example.com",
-        roles=["customer:read", "customer:write"],
+    fake_queue.bind.assert_awaited_with(fake_exchange, routing_key="rk")
+    assert called["payload"] == {"foo": "bar"}
+    assert called["rk"] == "rk"
+
+
+@pytest.mark.asyncio
+async def test_start_consumer_fanout():
+    fake_queue = AsyncMock()
+    fake_channel = AsyncMock()
+    fake_channel.declare_queue.return_value = fake_queue
+    fake_connection = AsyncMock()
+    fake_connection.channel.return_value = fake_channel
+    fake_exchange = AsyncMock()
+
+    async def handler(payload, rk): ...
+
+    fake_queue.iterator = lambda: FakeAsyncIterator([])
+
+    task = asyncio.create_task(
+        start_consumer(fake_connection, fake_exchange, aio_pika.ExchangeType.FANOUT,
+                       queue_name="q", patterns=[], handler=handler)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    fake_queue.bind.assert_awaited_with(fake_exchange, routing_key="")
+
+
+@pytest.mark.asyncio
+async def test_start_consumer_bad_json(caplog):
+    fake_queue = AsyncMock()
+    fake_channel = AsyncMock()
+    fake_channel.declare_queue.return_value = fake_queue
+    fake_connection = AsyncMock()
+    fake_connection.channel.return_value = fake_channel
+    fake_exchange = AsyncMock()
+
+    bad_msg = FakeMessage(b"\x80notjson")
+    fake_queue.iterator = lambda: FakeAsyncIterator([bad_msg])
+
+    called = {}
+    done = asyncio.Event()
+
+    async def handler(payload, rk):
+        called.update(payload)
+        done.set()
+
+    task = asyncio.create_task(
+        start_consumer(fake_connection, fake_exchange, aio_pika.ExchangeType.TOPIC,
+                       queue_name="q", patterns=["rk"], handler=handler)
     )
 
-    app.dependency_overrides = {
-        customer_routes.get_customer_service: lambda: mock_svc,
-        security.require_user: lambda: fake_user_context,
-        security.require_read: lambda: fake_user_context,
-        security.require_write: lambda: fake_user_context,
-    }
+    await asyncio.wait_for(done.wait(), timeout=1)
+    task.cancel()
 
-    yield TestClient(app)
-    app.dependency_overrides = {}
+    assert "raw" in called
 
 
-# -------------------------
-# Cas "heureux"
-# -------------------------
+@pytest.mark.asyncio
+async def test_start_consumer_handler_exception(caplog):
+    fake_queue = AsyncMock()
+    fake_channel = AsyncMock()
+    fake_channel.declare_queue.return_value = fake_queue
+    fake_connection = AsyncMock()
+    fake_connection.channel.return_value = fake_channel
+    fake_exchange = AsyncMock()
 
-def test_create_customer(client):
-    r = client.post("/customers/", json={"name": "New", "email": "new@test.com"})
-    assert r.status_code == 201
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.create.assert_awaited()
+    good_msg = FakeMessage({"ok": True})
+    fake_queue.iterator = lambda: FakeAsyncIterator([good_msg])
 
+    async def handler(payload, rk):
+        raise RuntimeError("boom")
 
-def test_list_customers(client):
-    r = client.get("/customers/")
-    assert r.status_code == 200
-    assert isinstance(r.json(), list)
-
-
-def test_read_customer(client):
-    r = client.get("/customers/1")
-    assert r.status_code == 200
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.get.assert_called_with(1)
-
-
-def test_update_customer(client):
-    r = client.put("/customers/1", json={"name": "Updated"})
-    assert r.status_code == 200
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.update.assert_awaited()
-
-
-def test_delete_customer(client):
-    r = client.delete("/customers/1")
-    assert r.status_code == 200
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.delete.assert_awaited()
-
-
-def test_read_by_email(client):
-    r = client.get("/customers/email/client@test.com")
-    assert r.status_code == 200
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.get_by_email.assert_called_with("client@test.com")
-
-
-# -------------------------
-# Cas d'erreurs
-# -------------------------
-
-def test_read_not_found(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.get.side_effect = client_service.NotFoundError()
-    r = client.get("/customers/99")
-    assert r.status_code == 404
-
-
-def test_create_conflict(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.create.side_effect = client_service.EmailAlreadyExistsError()
-    r = client.post("/customers/", json={"name": "Dup", "email": "dup@test.com"})
-    assert r.status_code == 409
-
-
-def test_update_invalid_if_match(client):
-    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "abc"})
-    assert r.status_code == 400
-
-
-def test_update_not_found(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.update.side_effect = client_service.NotFoundError()
-    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
-    assert r.status_code == 404
-
-
-def test_update_conflict_email(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.update.side_effect = client_service.EmailAlreadyExistsError()
-    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
-    assert r.status_code == 409
-
-
-def test_update_conflict_version(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.update.side_effect = client_service.ConcurrencyConflictError()
-    r = client.put("/customers/1", json={"name": "Updated"}, headers={"If-Match": "1"})
-    assert r.status_code == 409
-
-
-def test_delete_not_found(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.delete.side_effect = client_service.NotFoundError()
-    r = client.delete("/customers/123")
-    assert r.status_code == 404
-
-
-def test_read_by_email_not_found(client):
-    mock_service = app.dependency_overrides[customer_routes.get_customer_service]()
-    mock_service.get_by_email.return_value = None
-    r = client.get("/customers/email/missing@test.com")
-    assert r.status_code == 404
-
-
-# -------------------------
-# Sécurité
-# -------------------------
-
-def test_forbidden_without_write_role(patch_rabbitmq):
-    """Vérifie qu'un utilisateur sans rôle 'customer:write' ne peut pas créer."""
-    mock_svc = AsyncMock(spec=client_service.CustomerService)
-
-    fake_user_context = security.AuthContext(
-        user="tester",
-        email="tester@example.com",
-        roles=["customer:read"],  # pas de write
+    caplog.set_level(logging.ERROR)
+    task = asyncio.create_task(
+        start_consumer(fake_connection, fake_exchange, aio_pika.ExchangeType.TOPIC,
+                       queue_name="q", patterns=["rk"], handler=handler)
     )
+    await asyncio.sleep(0.05)
+    task.cancel()
 
-    app.dependency_overrides = {
-        customer_routes.get_customer_service: lambda: mock_svc,
-        security.require_user: lambda: fake_user_context,
-        security.require_read: lambda: fake_user_context,
-        # require_write reste intact → doit déclencher 403
-    }
+    assert "Handler error rk=" in caplog.text
 
-    test_client = TestClient(app)
-    r = test_client.post("/customers/", json={"name": "X", "email": "x@test.com"})
-    assert r.status_code == 403
 
-    app.dependency_overrides = {}
+# ------------------------------
+# Misc: exchange type map
+# ------------------------------
+
+def test_exchange_type_map_defaults(monkeypatch):
+    # Cas invalide => fallback en TOPIC
+    monkeypatch.setattr("app.infra.events.rabbitmq.settings.RABBITMQ_EXCHANGE_TYPE", "invalid-type")
+    mq = RabbitMQ()
+    assert mq.exchange_type == aio_pika.ExchangeType.TOPIC
