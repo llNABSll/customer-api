@@ -196,3 +196,26 @@ def test_require_write_forbidden():
         security.require_write(ctx)
     assert e.value.status_code == 403
     assert security._ROLE_WRITE in e.value.detail
+
+def test_verifier_init_raises():
+    # jwks_url ou issuer vide => RuntimeError
+    with pytest.raises(RuntimeError):
+        security._Verifier("", "issuer")
+    with pytest.raises(RuntimeError):
+        security._Verifier("http://jwks", "")
+
+
+def test_require_user_jwt_invalid_triggers_except(monkeypatch, caplog):
+    # On force un vrai _Verifier qui va raise dans decode()
+    class BadVerifier:
+        def decode(self, token): raise Exception("boom")
+
+    monkeypatch.setattr(security, "_get_verifier", lambda: BadVerifier())
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+
+    caplog.set_level("WARNING")
+    with pytest.raises(HTTPException) as e:
+        security.require_user(creds=creds)
+
+    assert e.value.status_code == 401
+    assert "JWT invalide" in caplog.text

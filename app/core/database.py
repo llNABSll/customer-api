@@ -2,30 +2,33 @@ from __future__ import annotations
 
 import logging
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+# --- Base déclarative ---
+class Base(DeclarativeBase):
+    """Base pour tous les modèles SQLAlchemy."""
+
+
 # --- Engine SQLAlchemy ---
 engine = create_engine(
     settings.DATABASE_URL,
     future=True,
-    pool_pre_ping=True,               # évite les connexions mortes
+    pool_pre_ping=True,
     echo=getattr(settings, "DB_ECHO", False),
 )
 
 # --- Session factory ---
 SessionLocal = sessionmaker(
     bind=engine,
-    autoflush=False,                  # flush explicite
-    autocommit=False,                 # commit explicite dans les services
+    autoflush=False,
+    autocommit=False,
     future=True,
 )
-
-# --- Base déclarative ---
-Base = declarative_base()
 
 
 def init_db() -> None:
@@ -34,7 +37,6 @@ def init_db() -> None:
     IMPORTANT: il faut que les modules de modèles soient importés
     avant d'appeler Base.metadata.create_all().
     """
-    # Importe les modèles (via le package aggregator)
     from app import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
     logger.info("DB init: tables ensured")
@@ -42,12 +44,6 @@ def init_db() -> None:
 
 # --- Dépendance FastAPI pour obtenir une session ---
 def get_db():
-    """
-    Ouvre une session par requête HTTP.
-    - rollback sur exception
-    - fermeture systématique
-    (Le commit reste à la charge du service si tu veux des transactions explicites.)
-    """
     db = SessionLocal()
     logger.debug("db session opened")
     try:

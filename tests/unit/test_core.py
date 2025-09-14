@@ -1,5 +1,3 @@
-# tests/unit/test_core.py
-import os
 import logging
 import pytest
 import sqlalchemy
@@ -35,12 +33,45 @@ def test_compose_db_url_postgres(monkeypatch):
     assert s.DATABASE_URL.startswith("postgresql+")
 
 
+def test_compose_db_url_sqlite(monkeypatch, tmp_path):
+    # Supprime toutes les variables Postgres et DATABASE_URL
+    for var in [
+        "DATABASE_URL", "CUSTOMER_POSTGRES_HOST", "CUSTOMER_POSTGRES_DB",
+        "CUSTOMER_POSTGRES_USER", "CUSTOMER_POSTGRES_PASSWORD",
+        "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD",
+    ]:
+        monkeypatch.delenv(var, raising=False)
+
+    sqlite_file = tmp_path / "my.db"
+    monkeypatch.setenv("SQLITE_PATH", str(sqlite_file))
+
+    s = config.Settings()
+    assert s.DATABASE_URL.startswith("sqlite:///")
+    # Vérifie que le dossier existe
+    assert sqlite_file.parent.exists()
+
+
 def test_settings_defaults(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     s = config.Settings()
     assert isinstance(s.APP_NAME, str)
     assert isinstance(s.ROLE_READ, str)
     assert s.RABBITMQ_EXCHANGE_TYPE in ("topic", "fanout", "direct", "headers")
+
+
+def test_settings_database_url_from_env(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host:5432/dbname")
+    s = config.Settings()
+    assert s.DATABASE_URL == "postgresql://u:p@host:5432/dbname"
+
+
+def test_settings_keycloak_and_cors(monkeypatch):
+    monkeypatch.setenv("KEYCLOAK_ISSUER", "http://kc")
+    monkeypatch.delenv("KEYCLOAK_JWKS_URL", raising=False)
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://a.com,http://b.com")
+    s = config.Settings()
+    assert s.KEYCLOAK_JWKS_URL.endswith("/protocol/openid-connect/certs")
+    assert "http://a.com" in s.CORS_ALLOW_ORIGINS
 
 
 # ---------- database.py ----------
@@ -69,12 +100,25 @@ def test_get_db_success_and_exception(monkeypatch):
     with pytest.raises(StopIteration):
         gen.send(None)
 
-    # cas exception
+    # cas exception (rollback OK)
     db.rollback = MagicMock()
     gen = database.get_db()
     next(gen)
     with pytest.raises(ValueError):
         gen.throw(ValueError("fail"))
+    db.rollback.assert_called_once()
+
+
+def test_get_db_rollback_and_close_fail(monkeypatch):
+    fake_db = MagicMock()
+    fake_db.rollback.side_effect = Exception("rollback fail")
+    fake_db.close.side_effect = Exception("close fail")
+    monkeypatch.setattr(database, "SessionLocal", lambda: fake_db)
+
+    gen = database.get_db()
+    next(gen)
+    with pytest.raises(ValueError):
+        gen.throw(ValueError("boom"))
 
 
 # ---------- logging.py ----------
@@ -94,18 +138,28 @@ def test_context_filter_and_secrets_filter():
     assert "[REDACTED]" in record.msg
 
 
+def test_secrets_filter_non_str_msg():
+    f = core_logging.SecretsFilter()
+    record = logging.LogRecord("n", logging.INFO, "", 1, {"a": 1}, (), None)
+    assert f.filter(record)
+
+
 def test_json_and_plain_formatter():
     rec = logging.LogRecord("n", logging.INFO, "", 1, "hello", (), None)
     j = core_logging.JsonFormatter()
     out = j.format(rec)
     assert "hello" in out
 
+    rec.request_id = "rid"
+    rec.service = "svc"
     p = core_logging.PlainFormatter("%(message)s")
     out = p.format(rec)
     assert "hello" in out
+    assert "service=svc" in out
+    assert "rid=rid" in out
 
 
-def test_setup_logging_idempotent(tmp_path, monkeypatch):
+def test_setup_logging_plain_and_json(tmp_path, monkeypatch):
     monkeypatch.setattr(config.settings, "LOG_DIR", str(tmp_path))
     monkeypatch.setattr(config.settings, "LOG_FORMAT", "plain")
     monkeypatch.setattr(config.settings, "LOG_ENABLE_CONSOLE", True)
@@ -114,9 +168,14 @@ def test_setup_logging_idempotent(tmp_path, monkeypatch):
     logger = logging.getLogger()
     assert any(isinstance(h, logging.Handler) for h in logger.handlers)
 
-    # second appel: idempotent
+    # Appel idempotent
     core_logging.setup_logging()
     assert getattr(logger, "_configured", False) is True
+
+    # Mode JSON sans console
+    monkeypatch.setattr(config.settings, "LOG_FORMAT", "json")
+    monkeypatch.setattr(config.settings, "LOG_ENABLE_CONSOLE", False)
+    core_logging.setup_logging()
 
 
 @pytest.mark.asyncio
@@ -130,9 +189,10 @@ async def test_access_log_middleware_success():
     async def call_next(req):
         return SimpleNamespace(status_code=200, headers={})
 
-    req = DummyRequest()
-    resp = await core_logging.access_log_middleware(req, call_next)
+    resp = await core_logging.access_log_middleware(DummyRequest(), call_next)
     assert resp.headers["X-Request-ID"]
+    # Après exécution, le request_id doit être reset
+    assert core_logging.get_request_id() is None
 
 
 @pytest.mark.asyncio

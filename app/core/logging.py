@@ -146,14 +146,15 @@ def setup_logging() -> None:
         access_logger.addHandler(console)
     access_logger.propagate = False
 
-    for name in ("uvicorn", "uvicorn.error"):
-        l = logging.getLogger(name)
-        l.setLevel(level)
-        l.handlers.clear()
-        l.addHandler(app_file)
+    for logger_name in ("uvicorn", "uvicorn.error"):
+        logger_uvicorn = logging.getLogger(logger_name)
+        logger_uvicorn.setLevel(level)
+        logger_uvicorn.handlers.clear()
+        logger_uvicorn.addHandler(app_file)
         if settings.LOG_ENABLE_CONSOLE:
-            l.addHandler(console)
-        l.propagate = False
+            logger_uvicorn.addHandler(console)
+        logger_uvicorn.propagate = False
+
 
     logging.getLogger("uvicorn.access").handlers.clear()
     logging.getLogger("uvicorn.access").propagate = False

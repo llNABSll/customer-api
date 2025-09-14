@@ -57,11 +57,11 @@ async def create_customer(
     dependencies=[Depends(require_read)],
 )
 def list_customers(
-    q: Optional[str] = Query(None, description="Recherche partielle sur le nom/email"),
+    q: Optional[str] = Query(None, description="Recherche partielle sur prénom/nom/email"),
     company: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
-    sort_by: Literal["id", "name", "email", "company", "created_at", "updated_at"] = Query("id"),
+    sort_by: Literal["id", "first_name", "last_name", "email", "company", "created_at", "updated_at"] = Query("id"),
     sort_dir: Literal["asc", "desc"] = Query("asc"),
     svc: CustomerService = Depends(get_customer_service),
 ):
