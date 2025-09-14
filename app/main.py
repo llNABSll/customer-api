@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import engine, init_db, SessionLocal
 from app.infra.events.rabbitmq import rabbitmq, start_consumer
+from app.api.routes import router as customer_router
 
 from app.infra.events.handlers import (
     handle_order_created,
@@ -155,5 +156,4 @@ def health():
     return {"status": "ok"}
 
 # Router métier
-from app.api.routes import router as customer_router
 app.include_router(customer_router)
