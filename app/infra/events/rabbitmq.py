@@ -5,6 +5,11 @@ import logging
 from typing import Iterable, Awaitable, Callable, Any
 
 import aio_pika
+from aio_pika.abc import (
+    AbstractRobustConnection,
+    AbstractChannel,
+    AbstractExchange,
+)
 
 from app.core.config import settings
 
@@ -20,19 +25,16 @@ _EXCHANGE_TYPE_MAP: dict[str, aio_pika.ExchangeType] = {
 
 class RabbitMQ:
     def __init__(self) -> None:
-        # URL commune (fallback par défaut)
         self.url: str = settings.RABBITMQ_URL or "amqp://app:app@rabbitmq:5672/%2F"
-
-        # Exchange + type (pilotés par l'env)
         self.exchange_name: str = settings.RABBITMQ_EXCHANGE or "events"
         self.exchange_type: aio_pika.ExchangeType = _EXCHANGE_TYPE_MAP.get(
             (settings.RABBITMQ_EXCHANGE_TYPE or "topic").lower(),
             aio_pika.ExchangeType.TOPIC,
         )
 
-        self.connection: aio_pika.RobustConnection | None = None
-        self.channel: aio_pika.Channel | None = None
-        self.exchange: aio_pika.Exchange | None = None
+        self.connection: AbstractRobustConnection | None = None
+        self.channel: AbstractChannel | None = None
+        self.exchange: AbstractExchange | None = None
 
     async def connect(self) -> None:
         """Connexion robuste + déclaration de l'exchange."""
@@ -69,7 +71,7 @@ class RabbitMQ:
             return
 
         try:
-            rk = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
+            rk: str = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
             await self.exchange.publish(
                 aio_pika.Message(
                     body=json.dumps(message).encode("utf-8"),
@@ -86,10 +88,10 @@ class RabbitMQ:
 rabbitmq = RabbitMQ()
 
 
-# ---------- Consommation (topic ou fanout) ----------
+# ---------- Consommation ----------
 async def start_consumer(
-    connection: aio_pika.RobustConnection,
-    exchange: aio_pika.Exchange,
+    connection: AbstractRobustConnection,
+    exchange: AbstractExchange,
     exchange_type: aio_pika.ExchangeType,
     queue_name: str,
     patterns: Iterable[str],
@@ -99,7 +101,7 @@ async def start_consumer(
     - topic: bind sur chaque pattern fourni (ex: 'order.#', 'customer.#')
     - fanout: ignore les patterns et bind sans routing_key
     """
-    channel = await connection.channel()
+    channel: AbstractChannel = await connection.channel()
     await channel.set_qos(prefetch_count=16)
 
     queue = await channel.declare_queue(queue_name, durable=True, auto_delete=False)

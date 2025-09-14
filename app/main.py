@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable, Awaitable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +15,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import engine, init_db, SessionLocal
 from app.infra.events.rabbitmq import rabbitmq, start_consumer
-from app.api.routes import router as customer_router
+from app.api.routes import router as customer_router  # type: ignore
 
 from app.infra.events.handlers import (
     handle_order_created,
@@ -32,14 +32,21 @@ try:
 except Exception:
     logging.basicConfig(level=logging.INFO)
 
-    async def access_log_middleware(request: Request, call_next: Callable[..., Any]) -> Response:
+    async def access_log_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         return await call_next(request)
 
 logger = logging.getLogger("customer-api")
 
 # Prometheus
-REQUEST_COUNT = Counter("http_requests_total", "Total des requêtes HTTP", ["method", "path", "status"])
-REQUEST_LATENCY = Histogram("http_request_duration_seconds", "Latence des requêtes HTTP", ["method", "path"])
+REQUEST_COUNT = Counter(
+    "http_requests_total", "Total des requêtes HTTP", ["method", "path", "status"]
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds", "Latence des requêtes HTTP", ["method", "path"]
+)
 
 
 @asynccontextmanager
@@ -91,7 +98,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 handler=consumer_handler,
             )
         )
-
         logger.info("[customer-api] Consumer lancé (q-customer, patterns=order.#)")
     except Exception as e:
         logger.exception("[customer-api] Échec initialisation RabbitMQ: %s", e)
@@ -139,12 +145,16 @@ async def metrics_middleware(request: Request, call_next: Callable[..., Any]) ->
 
 
 # CORS
-allow_methods = ["*"] if settings.CORS_ALLOW_METHODS == "*" else [
-    m.strip() for m in settings.CORS_ALLOW_METHODS.split(",") if m.strip()
-]
-allow_headers = ["*"] if settings.CORS_ALLOW_HEADERS == "*" else [
-    h.strip() for h in settings.CORS_ALLOW_HEADERS.split(",") if h.strip()
-]
+allow_methods = (
+    ["*"]
+    if settings.CORS_ALLOW_METHODS == "*"
+    else [m.strip() for m in settings.CORS_ALLOW_METHODS.split(",") if m.strip()]
+)
+allow_headers = (
+    ["*"]
+    if settings.CORS_ALLOW_HEADERS == "*"
+    else [h.strip() for h in settings.CORS_ALLOW_HEADERS.split(",") if h.strip()]
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ALLOW_ORIGINS,
