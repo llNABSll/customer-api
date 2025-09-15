@@ -179,7 +179,16 @@ async def test_delete_ok(fake_db, fake_mq, client_instance, monkeypatch):
     svc = CustomerService(fake_db, fake_mq)
     deleted = await svc.delete(1)
     assert deleted == client_instance
-    fake_mq.publish_message.assert_awaited_with("customer.deleted", {"id": 1})
+
+    fake_mq.publish_message.assert_awaited_with(
+        "customer.deleted",
+        {
+            "id": 1,
+            "email": client_instance.email,
+            "first_name": client_instance.first_name,
+            "last_name": client_instance.last_name,
+        },
+    )
 
 @pytest.mark.asyncio
 async def test_delete_not_found(fake_db, fake_mq, monkeypatch):
