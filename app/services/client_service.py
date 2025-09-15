@@ -110,5 +110,10 @@ class CustomerService:
         if not customer:
             raise NotFoundError("Customer not found")
         if self.mq:
-            await self.mq.publish_message("customer.deleted", {"id": customer_id})
+            await self.mq.publish_message("customer.deleted", {
+                "id": customer_id,
+                "email": customer.email,
+                "first_name": customer.first_name,
+                "last_name": customer.last_name,
+            })
         return customer
