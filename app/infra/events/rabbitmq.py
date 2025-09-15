@@ -71,7 +71,7 @@ class RabbitMQ:
             return
 
         try:
-            rk: str = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
+            rk = routing_key if self.exchange_type == aio_pika.ExchangeType.TOPIC else ""
             await self.exchange.publish(
                 aio_pika.Message(
                     body=json.dumps(message).encode("utf-8"),
@@ -88,7 +88,6 @@ class RabbitMQ:
 rabbitmq = RabbitMQ()
 
 
-# ---------- Consommation ----------
 async def start_consumer(
     connection: AbstractRobustConnection,
     exchange: AbstractExchange,
@@ -97,11 +96,8 @@ async def start_consumer(
     patterns: Iterable[str],
     handler: Callable[[dict[str, Any], str], Awaitable[None]],
 ) -> None:
-    """
-    - topic: bind sur chaque pattern fourni (ex: 'order.#', 'customer.#')
-    - fanout: ignore les patterns et bind sans routing_key
-    """
-    channel: AbstractChannel = await connection.channel()
+    """Démarre un consumer (topic ou fanout)."""
+    channel = await connection.channel()
     await channel.set_qos(prefetch_count=16)
 
     queue = await channel.declare_queue(queue_name, durable=True, auto_delete=False)

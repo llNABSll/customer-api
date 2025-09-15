@@ -5,7 +5,6 @@ class MessagePublisher(Protocol):
     async def publish_message(self, routing_key: str, message: dict) -> None:
         """
         Contrat minimal pour tout publisher de messages.
-        Exemple: RabbitMQ, Kafka, ou mock en test.
         """
         ...
 
@@ -22,6 +21,5 @@ class MessageConsumer(Protocol):
     ) -> None:
         """
         Contrat minimal pour tout consumer d’événements.
-        Exemple: RabbitMQ, Kafka, ou mock en test.
         """
         ...
