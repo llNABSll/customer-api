@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.security.security import AuthContext, require_read, require_write
 
+pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def client_auth(client, patch_rabbitmq):
