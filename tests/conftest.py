@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from _pytest.config import Config
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -21,6 +22,15 @@ engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def pytest_configure(config: Config):
+    """
+    Déclare les marqueurs personnalisés pour éviter les warnings 'Unknown mark'
+    """
+    config.addinivalue_line("markers", "unit: tests unitaires")
+    config.addinivalue_line("markers", "integration: tests d'intégration")
+    config.addinivalue_line("markers", "acceptance: tests de recette (scénarios métier)")
+
 
 # Create tables once for the entire test session
 Base.metadata.create_all(bind=engine)
