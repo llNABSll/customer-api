@@ -17,8 +17,30 @@ class DummyCustomer:
 class DummyDB:
     def __init__(self):
         self._committed = False
+        self._rolled_back = False
+
     def commit(self):
         self._committed = True
+
+    def rollback(self):
+        self._rolled_back = True
+
+
+class DummyMQ:
+    async def publish_message(self, rk, payload):
+        self.last = (rk, payload)
+
+
+class DummyService:
+    def __init__(self, customer=None, raise_notfound=False):
+        self.customer = customer or DummyCustomer()
+        self.raise_notfound = raise_notfound
+        self.mq = DummyMQ()
+
+    def get(self, cid):
+        if self.raise_notfound:
+            raise NotFoundError()
+        return self.customer
 
 
 # ---------------- parse_iso ----------------
@@ -42,83 +64,56 @@ def test_parse_iso_valid():
 @pytest.mark.asyncio
 async def test_handle_order_created_ok(monkeypatch):
     db = DummyDB()
-    cust = DummyCustomer()
+    svc = DummyService()
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
 
-    class DummyService:
-        def get(self, cid): return cust
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: DummyService())
-
-    payload = {"customer_id": 1, "created_at": datetime.now().isoformat()}
+    payload = {"order_id": 1, "customer_id": 1, "created_at": datetime.now().isoformat()}
     await handlers.handle_order_created(payload, db)
 
     assert db._committed is True
+    assert svc.mq.last[0] == "order.customer_validated"
 
 
 @pytest.mark.asyncio
 async def test_handle_order_created_without_date(monkeypatch):
     db = DummyDB()
-    cust = DummyCustomer()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: cust})())
+    svc = DummyService()
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
 
-    payload = {"customer_id": 1}
+    payload = {"order_id": 2, "customer_id": 1}
     await handlers.handle_order_created(payload, db)
+
     assert db._committed is True
+    assert svc.mq.last[0] == "order.customer_validated"
 
 
 @pytest.mark.asyncio
-async def test_handle_order_created_no_customer_id(caplog):
+async def test_handle_order_created_no_customer_id(monkeypatch, caplog):
     db = DummyDB()
+    svc = DummyService()
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
     caplog.set_level(logging.WARNING)
-    await handlers.handle_order_created({"created_at": datetime.now().isoformat()}, db)
-    assert "order.created sans customer_id" in caplog.text
+    payload = {"order_id": 3}
+    await handlers.handle_order_created(payload, db)
+
+    assert "sans customer_id" in caplog.text
+    assert svc.mq.last[0] == "order.rejected"
 
 
 @pytest.mark.asyncio
 async def test_handle_order_created_not_found(monkeypatch, caplog):
     db = DummyDB()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: (_ for _ in ()).throw(NotFoundError())})())
+    svc = DummyService(raise_notfound=True)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
 
     caplog.set_level(logging.WARNING)
-    await handlers.handle_order_created({"customer_id": 99}, db)
-    assert "non trouvé" in caplog.text
+    payload = {"order_id": 4, "customer_id": 99}
+    await handlers.handle_order_created(payload, db)
 
-
-# ---------------- handle_order_deleted ----------------
-
-@pytest.mark.asyncio
-async def test_handle_order_deleted_ok(monkeypatch):
-    db = DummyDB()
-    cust = DummyCustomer(orders_count=3)
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: cust})())
-
-    await handlers.handle_order_deleted({"customer_id": 1}, db)
-    assert db._committed is True
-
-
-@pytest.mark.asyncio
-async def test_handle_order_deleted_no_customer_id(caplog):
-    db = DummyDB()
-    caplog.set_level(logging.WARNING)
-    await handlers.handle_order_deleted({}, db)
-    assert "order.deleted sans customer_id" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_handle_order_deleted_not_found(monkeypatch, caplog):
-    db = DummyDB()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: (_ for _ in ()).throw(NotFoundError())})())
-    caplog.set_level(logging.WARNING)
-    await handlers.handle_order_deleted({"customer_id": 42}, db)
-    assert "non trouvé" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_handle_order_deleted_count_zero(monkeypatch):
-    db = DummyDB()
-    cust = DummyCustomer(orders_count=0)
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: cust})())
-    await handlers.handle_order_deleted({"customer_id": 1}, db)
-    assert db._committed is True
+    assert db._rolled_back is True
+    assert "introuvable" in caplog.text
+    assert svc.mq.last[0] == "order.rejected"
 
 
 # ---------------- handle_order_confirmed ----------------
@@ -127,9 +122,10 @@ async def test_handle_order_deleted_count_zero(monkeypatch):
 async def test_handle_order_confirmed_ok(monkeypatch):
     db = DummyDB()
     cust = DummyCustomer()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: cust})())
+    svc = DummyService(customer=cust)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
 
-    payload = {"customer_id": 1, "created_at": datetime.now().isoformat()}
+    payload = {"order_id": 10, "customer_id": 1, "created_at": datetime.now().isoformat()}
     await handlers.handle_order_confirmed(payload, db)
 
     assert cust.orders_count == 1
@@ -137,38 +133,43 @@ async def test_handle_order_confirmed_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_order_confirmed_no_customer_id(caplog):
+async def test_handle_order_confirmed_no_order_id(caplog):
     db = DummyDB()
     caplog.set_level(logging.WARNING)
     await handlers.handle_order_confirmed({}, db)
-    assert "order.confirmed sans customer_id" in caplog.text
+    assert "payload sans order_id" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_order_confirmed_no_customer_id(caplog):
+    db = DummyDB()
+    caplog.set_level(logging.WARNING)
+    payload = {"order_id": 11}
+    await handlers.handle_order_confirmed(payload, db)
+    assert "sans customer_id" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_handle_order_confirmed_not_found(monkeypatch, caplog):
     db = DummyDB()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: (_ for _ in ()).throw(NotFoundError())})())
+    svc = DummyService(raise_notfound=True)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
     caplog.set_level(logging.WARNING)
-    await handlers.handle_order_confirmed({"customer_id": 123}, db)
-    assert "non trouvé" in caplog.text
+    payload = {"order_id": 12, "customer_id": 42}
+    await handlers.handle_order_confirmed(payload, db)
+    assert db._rolled_back is True
+    assert "introuvable" in caplog.text
 
 
 # ---------------- handle_order_rejected ----------------
 
 @pytest.mark.asyncio
-async def test_handle_order_rejected_ok(caplog):
+async def test_handle_order_rejected_logs(caplog):
     db = DummyDB()
     caplog.set_level(logging.INFO)
-    await handlers.handle_order_rejected({"customer_id": 99}, db)
-    assert "order.rejected reçu" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_handle_order_rejected_no_id(caplog):
-    db = DummyDB()
-    caplog.set_level(logging.WARNING)
-    await handlers.handle_order_rejected({}, db)
-    assert "order.rejected sans customer_id" in caplog.text
+    await handlers.handle_order_rejected({"order_id": 50, "reason": "bad", "customer_id": 9}, db)
+    assert "[order.rejected]" in caplog.text
 
 
 # ---------------- handle_order_cancelled ----------------
@@ -177,24 +178,86 @@ async def test_handle_order_rejected_no_id(caplog):
 async def test_handle_order_cancelled_decrement(monkeypatch):
     db = DummyDB()
     cust = DummyCustomer(orders_count=2)
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: cust})())
-    await handlers.handle_order_cancelled({"customer_id": 1}, db)
+    svc = DummyService(customer=cust)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    await handlers.handle_order_cancelled({"order_id": 20, "customer_id": 1}, db)
     assert cust.orders_count == 1
     assert db._committed is True
 
 
 @pytest.mark.asyncio
-async def test_handle_order_cancelled_no_id(caplog):
+async def test_handle_order_cancelled_zero(monkeypatch):
+    db = DummyDB()
+    cust = DummyCustomer(orders_count=0)
+    svc = DummyService(customer=cust)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    await handlers.handle_order_cancelled({"order_id": 21, "customer_id": 1}, db)
+    assert cust.orders_count == 0  # pas de décrément
+
+
+@pytest.mark.asyncio
+async def test_handle_order_cancelled_no_customer_id(caplog):
     db = DummyDB()
     caplog.set_level(logging.WARNING)
-    await handlers.handle_order_cancelled({}, db)
-    assert "order.cancelled sans customer_id" in caplog.text
+    await handlers.handle_order_cancelled({"order_id": 22}, db)
+    assert "order.cancelled" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_handle_order_cancelled_not_found(monkeypatch, caplog):
     db = DummyDB()
-    monkeypatch.setattr(handlers, "CustomerService", lambda db, mq=None: type("S", (), {"get": lambda self, cid: (_ for _ in ()).throw(NotFoundError())})())
+    svc = DummyService(raise_notfound=True)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
     caplog.set_level(logging.WARNING)
-    await handlers.handle_order_cancelled({"customer_id": 55}, db)
-    assert "non trouvé" in caplog.text
+    await handlers.handle_order_cancelled({"order_id": 23, "customer_id": 55}, db)
+    assert db._rolled_back is True
+    assert "introuvable" in caplog.text
+
+
+# ---------------- handle_order_deleted ----------------
+
+@pytest.mark.asyncio
+async def test_handle_order_deleted_ok(monkeypatch):
+    db = DummyDB()
+    cust = DummyCustomer(orders_count=3)
+    svc = DummyService(customer=cust)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    await handlers.handle_order_deleted({"order_id": 30, "customer_id": 1}, db)
+    assert cust.orders_count == 2
+    assert db._committed is True
+
+
+@pytest.mark.asyncio
+async def test_handle_order_deleted_no_customer_id(caplog):
+    db = DummyDB()
+    caplog.set_level(logging.WARNING)
+    await handlers.handle_order_deleted({"order_id": 31}, db)
+    assert "order.deleted" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_order_deleted_not_found(monkeypatch, caplog):
+    db = DummyDB()
+    svc = DummyService(raise_notfound=True)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    caplog.set_level(logging.WARNING)
+    await handlers.handle_order_deleted({"order_id": 32, "customer_id": 42}, db)
+    assert db._rolled_back is True
+    assert "introuvable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_order_deleted_zero(monkeypatch):
+    db = DummyDB()
+    cust = DummyCustomer(orders_count=0)
+    svc = DummyService(customer=cust)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    await handlers.handle_order_deleted({"order_id": 33, "customer_id": 1}, db)
+    assert cust.orders_count == 0
+    assert db._committed is True
