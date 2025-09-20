@@ -261,3 +261,51 @@ async def test_handle_order_deleted_zero(monkeypatch):
     await handlers.handle_order_deleted({"order_id": 33, "customer_id": 1}, db)
     assert cust.orders_count == 0
     assert db._committed is True
+
+
+@pytest.mark.asyncio
+async def test_handle_customer_validate_request_ok(monkeypatch):
+    db = DummyDB()
+    svc = DummyService()
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    payload = {"order_id": 1, "customer_id": 123}
+    await handlers.handle_customer_validate_request(payload, db)
+
+    assert svc.mq.last[0] == "order.customer_validated"
+
+
+@pytest.mark.asyncio
+async def test_handle_customer_validate_request_no_customer_id(monkeypatch, caplog):
+    db = DummyDB()
+    svc = DummyService()
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    caplog.set_level(logging.WARNING)
+    payload = {"order_id": 2}
+    await handlers.handle_customer_validate_request(payload, db)
+
+    assert "sans customer_id" in caplog.text
+    assert svc.mq.last[0] == "order.rejected"
+
+
+@pytest.mark.asyncio
+async def test_handle_customer_validate_request_not_found(monkeypatch, caplog):
+    db = DummyDB()
+    svc = DummyService(raise_notfound=True)
+    monkeypatch.setattr(handlers, "_get_service", lambda db: svc)
+
+    caplog.set_level(logging.WARNING)
+    payload = {"order_id": 3, "customer_id": 999}
+    await handlers.handle_customer_validate_request(payload, db)
+
+    assert "introuvable" in caplog.text
+    assert svc.mq.last[0] == "order.rejected"
+
+@pytest.mark.asyncio
+async def test_handle_order_rejected_no_reason(monkeypatch, caplog):
+    db = DummyDB()
+    caplog.set_level(logging.INFO)
+    payload = {"order_id": 100}
+    await handlers.handle_order_rejected(payload, db)
+    assert "Unknown" in caplog.text

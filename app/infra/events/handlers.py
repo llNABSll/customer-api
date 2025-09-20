@@ -147,3 +147,36 @@ async def handle_order_deleted(payload: dict, db: Session) -> None:
     except NotFoundError:
         db.rollback()
         logger.warning("[order.deleted] client %s introuvable", customer_id)
+
+
+async def handle_customer_validate_request(payload: dict, db: Session) -> None:
+    """
+    Quand order-api demande de valider un client.
+    -> publie order.customer_validated OU order.rejected
+    """
+    svc = _get_service(db)
+    order_id = payload.get("order_id")
+    customer_id = payload.get("customer_id")
+
+    if not customer_id:
+        logger.warning("[customer.validate_request] commande %s sans customer_id -> rejet", order_id)
+        await svc.mq.publish_message("order.rejected", {
+            "order_id": order_id,
+            "reason": "Missing customer_id"
+        })
+        return
+
+    try:
+        svc.get(customer_id)  # lève NotFoundError si absent
+        await svc.mq.publish_message("order.customer_validated", {
+            "order_id": order_id,
+            "customer_id": customer_id
+        })
+        logger.info("[customer.validate_request] client %s validé pour commande %s",
+                    customer_id, order_id)
+    except NotFoundError:
+        await svc.mq.publish_message("order.rejected", {
+            "order_id": order_id,
+            "reason": f"Customer {customer_id} not found"
+        })
+        logger.warning("[customer.validate_request] client %s introuvable -> rejet", customer_id)
