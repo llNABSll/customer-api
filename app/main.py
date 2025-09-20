@@ -23,6 +23,7 @@ from app.infra.events.handlers import (
     handle_order_rejected,
     handle_order_cancelled,
     handle_order_deleted,
+    handle_customer_validate_request
 )
 
 # Logging
@@ -68,7 +69,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[customer-api] received %s: %s", rk, payload)
             db = SessionLocal()
             try:
-                if rk == "order.created":
+                if rk == "customer.validate_request":
+                    await handle_customer_validate_request(payload, db)
+                elif rk == "order.created":
                     await handle_order_created(payload, db)
                 elif rk == "order.confirmed":
                     await handle_order_confirmed(payload, db)
@@ -89,7 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 exchange=rabbitmq.exchange_name, 
                 exchange_type=rabbitmq.exchange_type,
                 queue_name="q-customer",
-                patterns=["order.#"],
+                patterns=["order.#", "customer.#"],
                 handler=consumer_handler,
             )
         )
